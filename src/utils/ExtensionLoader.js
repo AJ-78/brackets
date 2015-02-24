@@ -23,18 +23,37 @@
 
 
 /*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, maxerr: 50 */
-/*global define, $, CodeMirror, brackets */
+/*global define, $, CodeMirror, brackets, window */
 
 /**
  * ExtensionLoader searches the filesystem for extensions, then creates a new context for each one and loads it
  */
 
 define(function (require, exports, module) {
-    'use strict';
+    "use strict";
+
+    require("utils/Global");
 
     var NativeFileSystem    = require("file/NativeFileSystem").NativeFileSystem,
         FileUtils           = require("file/FileUtils"),
-        Async               = require("utils/Async");
+        Async               = require("utils/Async"),
+        contexts            = {},
+        globalConfig        = {
+            "text" : "../../../thirdparty/text",
+            "i18n" : "../../../thirdparty/i18n"
+        };
+    
+    /**
+     * Returns the require.js require context used to load an extension
+     *
+     * @param {!string} name, used to identify the extension
+     * @return {!Object} A require.js require object used to load the extension, or undefined if 
+     * there is no require object ith that name
+     */
+    function getRequireContextForExtension(name) {
+        return contexts[name];
+    }
+
     
     /**
      * Loads the extension that lives at baseUrl into its own Require.js context
@@ -44,17 +63,21 @@ define(function (require, exports, module) {
      * @param {!string} entryPoint, name of the main js file to load
      * @return {!$.Promise} A promise object that is resolved when the extension is loaded.
      */
-    function loadExtension(name, baseUrl, entryPoint) {
+    function loadExtension(name, config, entryPoint) {
         var result = new $.Deferred(),
             extensionRequire = brackets.libRequire.config({
                 context: name,
-                baseUrl: baseUrl
+                baseUrl: config.baseUrl,
+                /* FIXME (issue #1087): can we pass this from the global require context instead of hardcoding twice? */
+                paths: globalConfig,
+                locale: window.localStorage.getItem("locale") || brackets.app.language
             });
+        contexts[name] = extensionRequire;
 
-        console.log("[Extension] starting to load " + baseUrl);
+        console.log("[Extension] starting to load " + config.baseUrl);
         
         extensionRequire([entryPoint], function () {
-            console.log("[Extension] finished loading " + baseUrl);
+            console.log("[Extension] finished loading " + config.baseUrl);
             result.resolve();
         });
         
@@ -69,13 +92,13 @@ define(function (require, exports, module) {
      * @param {!string} entryPoint, name of the main js file to load
      * @return {!$.Promise} A promise object that is resolved when all extensions complete loading.
      */
-    function testExtension(name, baseUrl, entryPoint) {
+    function testExtension(name, config, entryPoint) {
         var result = new $.Deferred(),
             extensionPath = FileUtils.getNativeBracketsDirectoryPath();
         
         // Assumes the caller's window.location context is /test/SpecRunner.html
-        extensionPath = extensionPath.replace("brackets/test", "brackets/src"); // convert from "test" to "src"
-        extensionPath += "/" + baseUrl + "/" + entryPoint + ".js";
+        extensionPath = extensionPath.replace(/\/test$/, "/src"); // convert from "test" to "src"
+        extensionPath += "/" + config.baseUrl + "/" + entryPoint + ".js";
 
         var fileExists = false, statComplete = false;
         brackets.fs.stat(extensionPath, function (err, stat) {
@@ -84,12 +107,13 @@ define(function (require, exports, module) {
                 // unit test file exists
                 var extensionRequire = brackets.libRequire.config({
                     context: name,
-                    baseUrl: "../src/" + baseUrl
+                    baseUrl: "../src/" + config.baseUrl,
+                    paths: $.extend({}, config.paths, globalConfig)
                 });
     
-                console.log("[Extension] loading unit test " + baseUrl);
+                console.log("[Extension] loading unit test " + config.baseUrl);
                 extensionRequire([entryPoint], function () {
-                    console.log("[Extension] loaded unit tests " + baseUrl);
+                    console.log("[Extension] loaded unit tests " + config.baseUrl);
                     result.resolve();
                 });
             } else {
@@ -111,7 +135,7 @@ define(function (require, exports, module) {
      * @param {function} processExtension 
      * @return {!$.Promise} A promise object that is resolved when all extensions complete loading.
      */
-    function _loadAll(directory, baseUrl, entryPoint, processExtension) {
+    function _loadAll(directory, config, entryPoint, processExtension) {
         var result = new $.Deferred();
         
         NativeFileSystem.requestNativeFileSystem(directory,
@@ -128,13 +152,21 @@ define(function (require, exports, module) {
                                 extensions.push(entries[i].name);
                             }
                         }
+
+                        if (extensions.length === 0) {
+                            result.resolve();
+                            return;
+                        }
                         
                         Async.doInParallel(extensions, function (item) {
-                            return processExtension(item, baseUrl + "/" + item, entryPoint);
-                        }).done(function () {
+                            var extConfig = {
+                                baseUrl: config.baseUrl + "/" + item,
+                                paths: config.paths
+                            };
+                            return processExtension(item, extConfig, entryPoint);
+                        }).always(function () {
+                            // Always resolve the promise even when the extension entry point is missing
                             result.resolve();
-                        }).fail(function () {
-                            result.reject();
                         });
                     },
                     function (error) {
@@ -158,7 +190,7 @@ define(function (require, exports, module) {
      * @return {!$.Promise} A promise object that is resolved when all extensions complete loading.
      */
     function loadAllExtensionsInNativeDirectory(directory, baseUrl) {
-        return _loadAll(directory, baseUrl, "main", loadExtension);
+        return _loadAll(directory, {baseUrl: baseUrl}, "main", loadExtension);
     }
     
     /**
@@ -170,9 +202,20 @@ define(function (require, exports, module) {
      * @return {!$.Promise} A promise object that is resolved when all extensions complete loading.
      */
     function testAllExtensionsInNativeDirectory(directory, baseUrl) {
-        return _loadAll(directory, baseUrl, "unittests", testExtension);
+        var bracketsPath = FileUtils.getNativeBracketsDirectoryPath(),
+            config = {
+                baseUrl: baseUrl
+            };
+        
+        config.paths = {
+            "perf": bracketsPath + "/perf",
+            "spec": bracketsPath + "/spec"
+        };
+        
+        return _loadAll(directory, config, "unittests", testExtension);
     }
     
+    exports.getRequireContextForExtension = getRequireContextForExtension;
     exports.loadExtension = loadExtension;
     exports.testExtension = testExtension;
     exports.loadAllExtensionsInNativeDirectory = loadAllExtensionsInNativeDirectory;

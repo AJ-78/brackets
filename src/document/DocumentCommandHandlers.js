@@ -26,7 +26,7 @@
 /*global define, $, brackets, PathUtils, window */
 
 define(function (require, exports, module) {
-    'use strict';
+    "use strict";
     
     require("thirdparty/path-utils/path-utils.min");
     
@@ -38,13 +38,15 @@ define(function (require, exports, module) {
         ProjectManager      = require("project/ProjectManager"),
         DocumentManager     = require("document/DocumentManager"),
         EditorManager       = require("editor/EditorManager"),
+        FileViewController  = require("project/FileViewController"),
         FileUtils           = require("file/FileUtils"),
         StringUtils         = require("utils/StringUtils"),
         Async               = require("utils/Async"),
         Dialogs             = require("widgets/Dialogs"),
         Strings             = require("strings"),
         PreferencesManager  = require("preferences/PreferencesManager"),
-        PerfUtils           = require("utils/PerfUtils");
+        PerfUtils           = require("utils/PerfUtils"),
+        KeyEvent            = require("utils/KeyEvent");
     
     /**
      * Handlers for commands related to document handling (opening, saving, etc.)
@@ -52,6 +54,8 @@ define(function (require, exports, module) {
     
     /** @type {jQueryObject} Container for label shown above editor; must be an inline element */
     var _$title = null;
+    /** @type {jQueryObject} Container for dirty dot; must be an inline element */
+    var _$dirtydot = null;
     /** @type {jQueryObject} Container for _$title; need not be an inline element */
     var _$titleWrapper = null;
     /** @type {string} Label shown above editor for current document: filename and potentially some of its path */
@@ -62,19 +66,17 @@ define(function (require, exports, module) {
     /** @type {Number} Last known height of _$titleContainerToolbar */
     var _lastToolbarHeight = null;
     
-    var DIRTY_INDICATOR = " <span class='dirty-dot'>\u2022</span>";
-    
     function updateTitle() {
         var currentDoc = DocumentManager.getCurrentDocument();
         if (currentDoc) {
             _$title.text(_currentTitlePath);
             _$title.attr("title", currentDoc.file.fullPath);
-            if (currentDoc.isDirty) {
-                _$title.append(DIRTY_INDICATOR);
-            }
+            // dirty dot is always in DOM so layout doesn't change, and visibility is toggled
+            _$dirtydot.css("visibility", (currentDoc.isDirty) ? "visible" : "hidden");
         } else {
             _$title.text("");
             _$title.attr("title", "");
+            _$dirtydot.css("visibility", "hidden");
         }
         
         // Set _$titleWrapper to a fixed width just large enough to accomodate _$title. This seems equivalent to what
@@ -93,9 +95,13 @@ define(function (require, exports, module) {
         }
     }
     
-    function handleCurrentDocumentChange() {
+    function updateDocumentTitle() {
         var newDocument = DocumentManager.getCurrentDocument();
-        var perfTimerName = PerfUtils.markStart("DocumentCommandHandlers._onCurrentDocumentChange():\t" + (!newDocument || newDocument.file.fullPath));
+
+        // TODO: This timer is causing a "Recursive tests with the same name are not supporte"
+        // exception. This code should be removed (if not needed), or updated with a unique
+        // timer name (if needed).
+        // var perfTimerName = PerfUtils.markStart("DocumentCommandHandlers._onCurrentDocumentChange():\t" + (!newDocument || newDocument.file.fullPath));
         
         if (newDocument) {
             var fullPath = newDocument.file.fullPath;
@@ -111,7 +117,7 @@ define(function (require, exports, module) {
         // Update title text & "dirty dot" display
         updateTitle();
 
-        PerfUtils.addMeasurement(perfTimerName);
+        // PerfUtils.addMeasurement(perfTimerName);
     }
     
     function handleDirtyChange(event, changedDoc) {
@@ -130,33 +136,34 @@ define(function (require, exports, module) {
      *  document for the specified file path, or rejected if the file can not be read.
      */
     function doOpen(fullPath) {
-        
-        var result = new $.Deferred(), promise = result.promise();
+        var result = new $.Deferred();
+
         if (!fullPath) {
             console.log("doOpen() called without fullPath");
             result.reject();
-            return promise;
-        }
-        
-        PerfUtils.markStart(PerfUtils.OPEN_FILE);
-        result.always(function () {
-            PerfUtils.addMeasurement(PerfUtils.OPEN_FILE);
-        });
-        
-        // Load the file if it was never open before, and then switch to it in the UI
-        DocumentManager.getDocumentForPath(fullPath)
-            .done(function (doc) {
-                DocumentManager.setCurrentDocument(doc);
-                result.resolve(doc);
-            })
-            .fail(function (fileError) {
-                FileUtils.showFileOpenError(fileError.code, fullPath).done(function () {
-                    EditorManager.focusEditor();
-                    result.reject();
-                });
+        } else {
+            var perfTimerName = PerfUtils.markStart("Open File:\t" + fullPath);
+            result.always(function () {
+                PerfUtils.addMeasurement(perfTimerName);
             });
+            
+            // Load the file if it was never open before, and then switch to it in the UI
+            DocumentManager.getDocumentForPath(fullPath)
+                .done(function (doc) {
+                    DocumentManager.setCurrentDocument(doc);
+                    result.resolve(doc);
+                })
+                .fail(function (fileError) {
+                    FileUtils.showFileOpenError(fileError.code, fullPath).done(function () {
+                        // For performance, we do lazy checking of file existence, so it may be in working set
+                        DocumentManager.removeFromWorkingSet(new NativeFileSystem.FileEntry(fullPath));
+                        EditorManager.focusEditor();
+                        result.reject();
+                    });
+                });
+        }
 
-        return promise;
+        return result.promise();
     }
     
     /**
@@ -189,9 +196,13 @@ define(function (require, exports, module) {
                     var i;
                     
                     if (paths.length > 0) {
-                        for (i = 0; i < paths.length - 1; i++) {
-                            DocumentManager.addToWorkingSet(new NativeFileSystem.FileEntry(paths[i]));
-                        }
+                        // Add all files to the working set without verifying that
+                        // they still exist on disk (for faster opening)
+                        var filesToOpen = [];
+                        paths.forEach(function (file) {
+                            filesToOpen.push(new NativeFileSystem.FileEntry(file));
+                        });
+                        DocumentManager.addListToWorkingSet(filesToOpen);
                         
                         doOpen(paths[paths.length - 1])
                             .done(function (doc) {
@@ -215,6 +226,10 @@ define(function (require, exports, module) {
         return result.promise();
     }
 
+    /**
+     * Opens the given file and makes it the current document. Does NOT add it to the working set.
+     * @param {!{fullPath:string}} Params for FILE_OPEN command
+     */
     function handleFileOpen(commandData) {
         var fullPath = null;
         if (commandData) {
@@ -230,7 +245,8 @@ define(function (require, exports, module) {
      * @param {!{fullPath:string}} Params for FILE_OPEN command
      */
     function handleFileAddToWorkingSet(commandData) {
-        handleFileOpen(commandData).done(function (doc) {
+        return handleFileOpen(commandData).done(function (doc) {
+            // addToWorkingSet is synchronous
             DocumentManager.addToWorkingSet(doc.file);
         });
     }
@@ -241,10 +257,11 @@ define(function (require, exports, module) {
      * @param {string} dir  The directory to use
      * @param {string} baseFileName  The base to start with, "-n" will get appened to make unique
      * @param {string} fileExt  The file extension
+     * @param {boolean} isFolder True if the suggestion is for a folder name
      * @return {$.Promise} a jQuery promise that will be resolved with a unique name starting with 
      *   the given base name
      */
-    function _getUntitledFileSuggestion(dir, baseFileName, fileExt) {
+    function _getUntitledFileSuggestion(dir, baseFileName, fileExt, isFolder) {
         var result = new $.Deferred();
         var suggestedName = baseFileName + fileExt;
         var dirEntry = new NativeFileSystem.DirectoryEntry(dir);
@@ -257,18 +274,30 @@ define(function (require, exports, module) {
             }
 
             //check this name
-            dirEntry.getFile(
-                suggestedName,
-                {},
-                function successCallback(entry) {
-                    //file exists, notify to the next progress
-                    result.notify(baseFileName + "-" + nextIndexToUse + fileExt, nextIndexToUse + 1);
-                },
-                function errorCallback(error) {
-                    //most likely error is FNF, user is better equiped to handle the rest
-                    result.resolve(suggestedName);
-                }
-            );
+            var successCallback = function (entry) {
+                //file exists, notify to the next progress
+                result.notify(baseFileName + "-" + nextIndexToUse + fileExt, nextIndexToUse + 1);
+            };
+            var errorCallback = function (error) {
+                //most likely error is FNF, user is better equiped to handle the rest
+                result.resolve(suggestedName);
+            };
+            
+            if (isFolder) {
+                dirEntry.getDirectory(
+                    suggestedName,
+                    {},
+                    successCallback,
+                    errorCallback
+                );
+            } else {
+                dirEntry.getFile(
+                    suggestedName,
+                    {},
+                    successCallback,
+                    errorCallback
+                );
+            }
         });
 
         //kick it off
@@ -285,9 +314,11 @@ define(function (require, exports, module) {
      * file creation call is outstanding
      */
     var fileNewInProgress = false;
-
-    function handleFileNewInProject() {
-
+    
+    /**
+     * Bottleneck function for creating new files and folders in the project tree.
+     */
+    function _handleNewItemInProject(isFolder) {
         if (fileNewInProgress) {
             ProjectManager.forceFinishRename();
             return;
@@ -308,23 +339,37 @@ define(function (require, exports, module) {
         
         // Create the new node. The createNewItem function does all the heavy work
         // of validating file name, creating the new file and selecting.
-        var deferred = _getUntitledFileSuggestion(baseDir, "Untitled", ".js");
+        var deferred = _getUntitledFileSuggestion(baseDir, Strings.UNTITLED, isFolder ? "" : ".js", isFolder);
         var createWithSuggestedName = function (suggestedName) {
-            ProjectManager.createNewItem(baseDir, suggestedName, false)
+            ProjectManager.createNewItem(baseDir, suggestedName, false, isFolder)
                 .pipe(deferred.resolve, deferred.reject, deferred.notify)
                 .always(function () { fileNewInProgress = false; });
         };
 
         deferred.done(createWithSuggestedName);
-        deferred.fail(function createWithDefault() { createWithSuggestedName("Untitled.js"); });
+        deferred.fail(function createWithDefault() { createWithSuggestedName(isFolder ? "Untitled" : "Untitled.js"); });
         return deferred;
     }
+
+    /**
+     * Create a new file in the project tree.
+     */
+    function handleFileNewInProject() {
+        _handleNewItemInProject(false);
+    }
     
+    /**
+     * Create a new folder in the project tree.
+     */
+    function handleNewFolderInProject() {
+        _handleNewItemInProject(true);
+    }
+
     function showSaveFileError(code, path) {
         return Dialogs.showModalDialog(
             Dialogs.DIALOG_ID_ERROR,
             Strings.ERROR_SAVING_FILE_TITLE,
-            Strings.format(
+            StringUtils.format(
                 Strings.ERROR_SAVING_FILE,
                 StringUtils.htmlEscape(path),
                 FileUtils.getFileErrorString(code)
@@ -361,8 +406,8 @@ define(function (require, exports, module) {
                         handleError(error, fileEntry);
                     };
 
-                    // TODO (issue #241): Blob instead of string
-                    writer.write(docToSave.getText());
+                    // We don't want normalized line endings, so it's important to pass true to getText()
+                    writer.write(docToSave.getText(true));
                 },
                 function (error) {
                     handleError(error, fileEntry);
@@ -426,6 +471,15 @@ define(function (require, exports, module) {
             },
             false
         );
+    }
+    
+    /**
+     * Saves all unsaved documents.
+     * @return {$.Promise} a promise that is resolved once ALL the saves have been completed; or rejected
+     *      after all operations completed if any ONE of them failed.
+     */
+    function handleFileSaveAll() {
+        return saveAll();
     }
     
     /**
@@ -506,7 +560,7 @@ define(function (require, exports, module) {
             Dialogs.showModalDialog(
                 Dialogs.DIALOG_ID_SAVE_CLOSE,
                 Strings.SAVE_CLOSE_TITLE,
-                Strings.format(Strings.SAVE_CLOSE_MESSAGE, StringUtils.htmlEscape(filename))
+                StringUtils.format(Strings.SAVE_CLOSE_MESSAGE, StringUtils.htmlEscape(filename))
             ).done(function (id) {
                 if (id === Dialogs.DIALOG_BTN_CANCEL) {
                     result.reject();
@@ -637,7 +691,7 @@ define(function (require, exports, module) {
     * Common implementation for close/quit/reload which all mostly
     * the same except for the final step
     */
-    function _handleWindowGoingAway(commandData, postCloseHandler) {
+    function _handleWindowGoingAway(commandData, postCloseHandler, failHandler) {
         if (_windowGoingAway) {
             //if we get called back while we're closing, then just return
             return (new $.Deferred()).resolve().promise();
@@ -653,28 +707,65 @@ define(function (require, exports, module) {
                 _windowGoingAway = true;
                 PreferencesManager.savePreferences();
                 postCloseHandler();
+            })
+            .fail(function () {
+                _windowGoingAway = false;
+                if (failHandler) {
+                    failHandler();
+                }
             });
+    }
+
+    /**
+    * @private
+    * Implementation for abortQuit callback to reset quit sequence settings
+    */
+    function _handleAbortQuit() {
+        _windowGoingAway = false;
     }
     
     /** Confirms any unsaved changes, then closes the window */
     function handleFileCloseWindow(commandData) {
-        return _handleWindowGoingAway(commandData, function () {
-            window.close();
-        });
+        return _handleWindowGoingAway(
+            commandData,
+            function () {
+                window.close();
+            },
+            function () {
+                // if fail, tell the app to abort any pending quit operation.
+                // TODO: remove this if statement when we move to the new CEF3 shell
+                if (brackets.app.abortQuit) {
+                    brackets.app.abortQuit();
+                }
+            }
+        );
     }
     
+    function handleFileRename() {
+        ProjectManager.renameSelectedItem();
+    }
+
     /** Closes the window, then quits the app */
     function handleFileQuit(commandData) {
-        return _handleWindowGoingAway(commandData, function () {
-            brackets.app.quit();
-        });
-        // if fail, don't exit: user canceled (or asked us to save changes first, but we failed to do so)
+        return _handleWindowGoingAway(
+            commandData,
+            function () {
+                brackets.app.quit();
+            },
+            function () {
+                // if fail, don't exit: user canceled (or asked us to save changes first, but we failed to do so)
+                // TODO: remove this if statement when we move to the new CEF3 shell
+                if (brackets.app.abortQuit) {
+                    brackets.app.abortQuit();
+                }
+            }
+        );
     }
 
     /** Does a full reload of the browser window */
     function handleFileReload(commandData) {
         return _handleWindowGoingAway(commandData, function () {
-            window.location.reload();
+            window.location.reload(true);
         });
     }
     
@@ -690,7 +781,7 @@ define(function (require, exports, module) {
      * @param {jQueryEvent} event Key-up event
      */
     function detectDocumentNavEnd(event) {
-        if (event.keyCode === 17) {  // Ctrl key
+        if (event.keyCode === KeyEvent.DOM_VK_CONTROL) {  // Ctrl key
             DocumentManager.finalizeDocumentNavigation();
             
             _addedNavKeyHandler = false;
@@ -720,11 +811,16 @@ define(function (require, exports, module) {
         goNextPrevDoc(-1);
     }
     
+    function handleShowInTree() {
+        ProjectManager.showInTree(DocumentManager.getCurrentDocument().file);
+    }
+    
 
     function init($titleContainerToolbar) {
         _$titleContainerToolbar = $titleContainerToolbar;
         _$titleWrapper = $(".title-wrapper", _$titleContainerToolbar);
         _$title = $(".title", _$titleWrapper);
+        _$dirtydot = $(".dirty-dot", _$titleWrapper);
 
         // Register global commands
         CommandManager.register(Strings.CMD_FILE_OPEN,          Commands.FILE_OPEN, handleFileOpen);
@@ -733,22 +829,25 @@ define(function (require, exports, module) {
         // File > New should open a new blank tab, and handleFileNewInProject should
         // be called from a "+" button in the project
         CommandManager.register(Strings.CMD_FILE_NEW,           Commands.FILE_NEW, handleFileNewInProject);
+        CommandManager.register(Strings.CMD_FILE_NEW_FOLDER,    Commands.FILE_NEW_FOLDER, handleNewFolderInProject);
         CommandManager.register(Strings.CMD_FILE_SAVE,          Commands.FILE_SAVE, handleFileSave);
-
+        CommandManager.register(Strings.CMD_FILE_SAVE_ALL,      Commands.FILE_SAVE_ALL, handleFileSaveAll);
+        CommandManager.register(Strings.CMD_FILE_RENAME,        Commands.FILE_RENAME, handleFileRename);
+        
         CommandManager.register(Strings.CMD_FILE_CLOSE,         Commands.FILE_CLOSE, handleFileClose);
         CommandManager.register(Strings.CMD_FILE_CLOSE_ALL,     Commands.FILE_CLOSE_ALL, handleFileCloseAll);
         CommandManager.register(Strings.CMD_CLOSE_WINDOW,       Commands.FILE_CLOSE_WINDOW, handleFileCloseWindow);
         CommandManager.register(Strings.CMD_QUIT,               Commands.FILE_QUIT, handleFileQuit);
         CommandManager.register(Strings.CMD_REFRESH_WINDOW,     Commands.DEBUG_REFRESH_WINDOW, handleFileReload);
+        CommandManager.register(Strings.CMD_ABORT_QUIT,         Commands.APP_ABORT_QUIT, _handleAbortQuit);
+        
         CommandManager.register(Strings.CMD_NEXT_DOC,           Commands.NAVIGATE_NEXT_DOC, handleGoNextDoc);
         CommandManager.register(Strings.CMD_PREV_DOC,           Commands.NAVIGATE_PREV_DOC, handleGoPrevDoc);
-
-        KeyBindingManager.addBinding(Commands.NAVIGATE_NEXT_DOC, "Ctrl-Tab");
-        KeyBindingManager.addBinding(Commands.NAVIGATE_PREV_DOC, "Ctrl-Shift-Tab");
+        CommandManager.register(Strings.CMD_SHOW_IN_TREE,       Commands.NAVIGATE_SHOW_IN_FILE_TREE, handleShowInTree);
         
         // Listen for changes that require updating the editor titlebar
         $(DocumentManager).on("dirtyFlagChange", handleDirtyChange);
-        $(DocumentManager).on("currentDocumentChange", handleCurrentDocumentChange);
+        $(DocumentManager).on("currentDocumentChange fileNameChange", updateDocumentTitle);
     }
 
     // Define public API

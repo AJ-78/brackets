@@ -29,7 +29,9 @@
  * Set of utilites for working with files and text content.
  */
 define(function (require, exports, module) {
-    'use strict';
+    "use strict";
+
+    require("utils/Global");
     
     var NativeFileSystem    = require("file/NativeFileSystem").NativeFileSystem,
         PerfUtils           = require("utils/PerfUtils"),
@@ -166,7 +168,7 @@ define(function (require, exports, module) {
         } else if (code === FileError.NO_MODIFICATION_ALLOWED_ERR) {
             result = Strings.NO_MODIFICATION_ALLOWED_ERR_FILE;
         } else {
-            result = Strings.format(Strings.GENERIC_ERROR, code);
+            result = StringUtils.format(Strings.GENERIC_ERROR, code);
         }
 
         return result;
@@ -176,7 +178,7 @@ define(function (require, exports, module) {
         return Dialogs.showModalDialog(
             Dialogs.DIALOG_ID_ERROR,
             Strings.ERROR_OPENING_FILE_TITLE,
-            Strings.format(
+            StringUtils.format(
                 Strings.ERROR_OPENING_FILE,
                 StringUtils.htmlEscape(path),
                 getFileErrorString(code)
@@ -200,6 +202,19 @@ define(function (require, exports, module) {
         
         return path;
     }
+    
+    /**
+     * Canonicalizes a folder path to not include a trailing slash.
+     * @param {string} path
+     * @return {string}
+     */
+    function canonicalizeFolderPath(path) {
+        if (path.length > 0 && path[path.length - 1] === "/") {
+            return path.slice(0, -1);
+        } else {
+            return path;
+        }
+    }
 
     /**
      * Returns a native absolute path to the 'brackets' source directory.
@@ -208,6 +223,12 @@ define(function (require, exports, module) {
      * @return {string}
      */
     function getNativeBracketsDirectoryPath() {
+        if (brackets.inBrowser) {
+            // Just return the current path "." if we are in the browser
+            // This will probably break on windows and show be changed to use fs.cwd
+            // However, that call must be asynchronous, which does not work here
+            return ".";
+        }
         var pathname = decodeURI(window.location.pathname);
         var directory = pathname.substr(0, pathname.lastIndexOf("/"));
         return convertToNativePath(directory);
@@ -226,8 +247,7 @@ define(function (require, exports, module) {
         if (module && module.uri) {
 
             // Remove window name from base path. Maintain trailing slash.
-            pathname = decodeURI(window.location.pathname);
-            path = convertToNativePath(pathname.substr(0, pathname.lastIndexOf("/") + 1));
+            path = getNativeBracketsDirectoryPath() + "/";
 
             // Remove module name from relative path. Remove trailing slash.
             pathname = decodeURI(module.uri);
@@ -246,6 +266,36 @@ define(function (require, exports, module) {
         }
         return path;
     }
+    
+    /**
+     * Update a file entry path after a file/folder name change.
+     * @param {FileEntry} entry The FileEntry or DirectoryEntry to update
+     * @param {string} oldName The full path of the old name
+     * @param {string} newName The full path of the new name
+     * @return {boolean} Returns true if the file entry was updated
+     */
+    function updateFileEntryPath(entry, oldName, newName) {
+        if (entry.fullPath.indexOf(oldName) === 0) {
+            var fullPath = entry.fullPath.replace(oldName, newName);
+            
+            entry.fullPath = fullPath;
+            
+            // TODO: Should this be a method on Entry instead?
+            entry.name = null; // default if extraction fails
+            if (fullPath) {
+                var pathParts = fullPath.split("/");
+                
+                // Extract name from the end of the fullPath (account for trailing slash(es))
+                while (!entry.name && pathParts.length) {
+                    entry.name = pathParts.pop();
+                }
+            }
+            
+            return true;
+        }
+        
+        return false;
+    }
 
     // Define public API
     exports.LINE_ENDINGS_CRLF              = LINE_ENDINGS_CRLF;
@@ -260,4 +310,6 @@ define(function (require, exports, module) {
     exports.convertToNativePath            = convertToNativePath;
     exports.getNativeBracketsDirectoryPath = getNativeBracketsDirectoryPath;
     exports.getNativeModuleDirectoryPath   = getNativeModuleDirectoryPath;
+    exports.canonicalizeFolderPath         = canonicalizeFolderPath;
+    exports.updateFileEntryPath            = updateFileEntryPath;
 });

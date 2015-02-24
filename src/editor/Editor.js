@@ -59,17 +59,34 @@
  *    $(editorInstance).on("eventname", handler);
  */
 define(function (require, exports, module) {
-    'use strict';
+    "use strict";
     
-    var EditorManager   = require("editor/EditorManager"),
-        Commands        = require("command/Commands"),
-        CommandManager  = require("command/CommandManager"),
-        PerfUtils       = require("utils/PerfUtils"),
-        Strings          = require("strings"),
-        TextRange       = require("document/TextRange").TextRange,
-        ViewUtils       = require("utils/ViewUtils");
+    var EditorManager      = require("editor/EditorManager"),
+        CodeHintManager    = require("editor/CodeHintManager"),
+        Commands           = require("command/Commands"),
+        CommandManager     = require("command/CommandManager"),
+        Menus              = require("command/Menus"),
+        PerfUtils          = require("utils/PerfUtils"),
+        PreferencesManager = require("preferences/PreferencesManager"),
+        Strings            = require("strings"),
+        TextRange          = require("document/TextRange").TextRange,
+        ViewUtils          = require("utils/ViewUtils");
     
-
+    var PREFERENCES_CLIENT_ID = "com.adobe.brackets.Editor",
+        defaultPrefs = { useTabChar: false, tabSize: 4, indentUnit: 4 };
+    
+    /** Editor preferences */
+    var _prefs = PreferencesManager.getPreferenceStorage(PREFERENCES_CLIENT_ID, defaultPrefs);
+    
+    /** @type {boolean}  Global setting: When inserting new text, use tab characters? (instead of spaces) */
+    var _useTabChar = _prefs.getValue("useTabChar");
+    
+    /** @type {boolean}  Global setting: Tab size */
+    var _tabSize = _prefs.getValue("tabSize");
+    
+    /** @type {boolean}  Global setting: Indent unit (i.e. number of spaces when indenting) */
+    var _indentUnit = _prefs.getValue("indentUnit");
+    
     /**
      * @private
      * Handle Tab key press.
@@ -116,7 +133,7 @@ define(function (require, exports, module) {
             if (instance.getOption("indentWithTabs")) {
                 CodeMirror.commands.insertTab(instance);
             } else {
-                var i, ins = "", numSpaces = instance.getOption("tabSize");
+                var i, ins = "", numSpaces = _indentUnit;
                 numSpaces -= to.ch % numSpaces;
                 for (i = 0; i < numSpaces; i++) {
                     ins += " ";
@@ -138,12 +155,11 @@ define(function (require, exports, module) {
         var handled = false;
         if (!instance.getOption("indentWithTabs")) {
             var cursor = instance.getCursor(),
-                tabSize = instance.getOption("tabSize"),
-                jump = cursor.ch % tabSize,
+                jump = cursor.ch % _indentUnit,
                 line = instance.getLine(cursor.line);
 
             if (direction === 1) {
-                jump = tabSize - jump;
+                jump = _indentUnit - jump;
 
                 if (cursor.ch + jump > line.length) { // Jump would go beyond current line
                     return false;
@@ -162,7 +178,7 @@ define(function (require, exports, module) {
                 // If we are on the tab boundary, jump by the full amount, 
                 // but not beyond the start of the line.
                 if (jump === 0) {
-                    jump = tabSize;
+                    jump = _indentUnit;
                 }
 
                 // Search backwards to the first non-space character
@@ -209,6 +225,13 @@ define(function (require, exports, module) {
         }
     }
 
+    function _handleKeyEvents(jqEvent, editor, event) {
+        _checkElectricChars(jqEvent, editor, event);
+
+        // Pass the key event to the code hint manager. It may call preventDefault() on the event.
+        CodeHintManager.handleKeyEvent(editor, event);
+    }
+
     function _handleSelectAll() {
         var editor = EditorManager.getFocusedEditor();
         if (editor) {
@@ -216,55 +239,12 @@ define(function (require, exports, module) {
         }
     }
     
-    /** Launches CodeMirror's basic Find-within-single-editor feature */
-    function _launchFind() {
-        var editor = EditorManager.getFocusedEditor();
-        if (editor) {
-            var codeMirror = editor._codeMirror;
-
-            // Bring up CodeMirror's existing search bar UI
-            codeMirror.execCommand("find");
-
-            // Prepopulate the search field with the current selection, if any
-            $(".CodeMirror-dialog input[type='text']")
-                .attr("value", codeMirror.getSelection())
-                .get(0).select();
-        }
-    }
-
-    function _findNext() {
-        var editor = EditorManager.getFocusedEditor();
-        if (editor) {
-            editor._codeMirror.execCommand("findNext");
-        }
-    }
-
-    function _findPrevious() {
-        var editor = EditorManager.getFocusedEditor();
-        if (editor) {
-            editor._codeMirror.execCommand("findPrev");
-        }
-    }
-
-    function _replace() {
-        var editor = EditorManager.getFocusedEditor();
-        if (editor) {
-            editor._codeMirror.execCommand("replace");
-        }
-    }
-    
-    
-    
     /**
      * List of all current (non-destroy()ed) Editor instances. Needed when changing global preferences
      * that affect all editors, e.g. tabbing or color scheme settings.
      * @type {Array.<Editor>}
      */
     var _instances = [];
-    
-    /** @type {boolean}  Global setting: When inserting new text, use tab characters? (instead of spaces) */
-    var _useTabChar = false;
-    
     
     
     /**
@@ -314,31 +294,37 @@ define(function (require, exports, module) {
         
         // Editor supplies some standard keyboard behavior extensions of its own
         var codeMirrorKeyMap = {
-            "Tab" : _handleTabKey,
+            "Tab": _handleTabKey,
+            "Shift-Tab": "indentLess",
 
-            "Left" : function (instance) {
+            "Left": function (instance) {
                 if (!_handleSoftTabNavigation(instance, -1, "moveH")) {
                     CodeMirror.commands.goCharLeft(instance);
                 }
             },
-            "Right" : function (instance) {
+            "Right": function (instance) {
                 if (!_handleSoftTabNavigation(instance, 1, "moveH")) {
                     CodeMirror.commands.goCharRight(instance);
                 }
             },
-            "Backspace" : function (instance) {
+            "Backspace": function (instance) {
                 if (!_handleSoftTabNavigation(instance, -1, "deleteH")) {
                     CodeMirror.commands.delCharLeft(instance);
                 }
             },
-            "Delete" : function (instance) {
+            "Delete": function (instance) {
                 if (!_handleSoftTabNavigation(instance, 1, "deleteH")) {
                     CodeMirror.commands.delCharRight(instance);
                 }
             },
+            "Esc": function (instance) {
+                self.removeAllInlineWidgets();
+            },
             "Shift-Delete": "cut",
             "Ctrl-Insert": "copy",
-            "Shift-Insert": "paste"
+            "Shift-Insert": "paste",
+            "'>'": function (cm) { cm.closeTag(cm, '>'); },
+            "'/'": function (cm) { cm.closeTag(cm, '/'); }
         };
         
         EditorManager.mergeExtraKeys(self, codeMirrorKeyMap, additionalKeys);
@@ -354,17 +340,24 @@ define(function (require, exports, module) {
         // (note: CodeMirror doesn't actually require using 'new', but jslint complains without it)
         this._codeMirror = new CodeMirror(container, {
             electricChars: false,   // we use our own impl of this to avoid CodeMirror bugs; see _checkElectricChars()
-            indentUnit: 4,
             indentWithTabs: _useTabChar,
+            tabSize: _tabSize,
+            indentUnit: _indentUnit,
             lineNumbers: true,
             matchBrackets: true,
+            dragDrop: false,    // work around issue #1123
             extraKeys: codeMirrorKeyMap
         });
+        
+        // Can't get CodeMirror's focused state without searching for
+        // CodeMirror-focused. Instead, track focus via onFocus and onBlur
+        // options and track state with this._focused
+        this._focused = false;
         
         this._installEditorListeners();
         
         $(this)
-            .on("keyEvent", _checkElectricChars)
+            .on("keyEvent", _handleKeyEvents)
             .on("change", this._handleEditorChange.bind(this));
         
         // Set code-coloring mode BEFORE populating with text, to avoid a flash of uncolored text
@@ -400,7 +393,7 @@ define(function (require, exports, module) {
         // Add scrollTop property to this object for the scroll shadow code to use
         Object.defineProperty(this, "scrollTop", {
             get: function () {
-                return this._codeMirror.scrollPos().y;
+                return this._codeMirror.getScrollInfo().y;
             }
         });
     }
@@ -447,17 +440,39 @@ define(function (require, exports, module) {
         var startLine = this.getFirstVisibleLine(),
             endLine = this.getLastVisibleLine();
         this.setSelection({line: startLine, ch: 0},
-                          {line: endLine, ch: this.getLineText(endLine).length});
+                          {line: endLine, ch: this.document.getLine(endLine).length});
+    };
+    
+    /**
+     * Ensures that the lines that are actually hidden in the inline editor correspond to
+     * the desired visible range.
+     */
+    Editor.prototype._updateHiddenLines = function () {
+        if (this._visibleRange) {
+            var cm = this._codeMirror,
+                self = this;
+            cm.operation(function () {
+                // TODO: could make this more efficient by only iterating across the min-max line
+                // range of the union of all changes
+                var i;
+                for (i = 0; i < cm.lineCount(); i++) {
+                    if (i < self._visibleRange.startLine || i > self._visibleRange.endLine) {
+                        self._hideLine(i);
+                    } else {
+                        // Double-check that the set of NON-hidden lines matches our range too
+                        console.assert(!cm.getLineHandle(i).hidden);
+                    }
+                }
+            });
+        }
     };
     
     Editor.prototype._applyChanges = function (changeList) {
-        var self = this;
-        
         // _visibleRange has already updated via its own Document listener. See if this change caused
         // it to lose sync. If so, our whole view is stale - signal our owner to close us.
         if (this._visibleRange) {
             if (this._visibleRange.startLine === null || this._visibleRange.endLine === null) {
-                $(self).triggerHandler("lostContent");
+                $(this).triggerHandler("lostContent");
                 return;
             }
         }
@@ -481,21 +496,7 @@ define(function (require, exports, module) {
         });
         
         // The update above may have inserted new lines - must hide any that fall outside our range
-        if (self._visibleRange) {
-            cm.operation(function () {
-                // TODO: could make this more efficient by only iterating across the min-max line
-                // range of the union of all changes
-                var i;
-                for (i = 0; i < cm.lineCount(); i++) {
-                    if (i < self._visibleRange.startLine || i > self._visibleRange.endLine) {
-                        self._hideLine(i);
-                    } else {
-                        // Double-check that the set of NON-hidden lines matches our range too
-                        console.assert(!cm.getLineHandle(i).hidden);
-                    }
-                }
-            });
-        }
+        this._updateHiddenLines();
     };
     
     /**
@@ -513,9 +514,7 @@ define(function (require, exports, module) {
         }
         
         // Secondary editor: force creation of "master" editor backing the model, if doesn't exist yet
-        if (!this.document._masterEditor) {
-            EditorManager._createFullEditorForDocument(this.document);
-        }
+        this.document._ensureMasterEditor();
         
         if (this.document._masterEditor !== this) {
             // Secondary editor:
@@ -528,6 +527,10 @@ define(function (require, exports, module) {
             this._duringSync = true;
             this.document._masterEditor._applyChanges(changeList);
             this._duringSync = false;
+            
+            // Update which lines are hidden inside our editor, since we're not going to go through
+            // _applyChanges() in our own editor.
+            this._updateHiddenLines();
         }
         // Else, Master editor:
         // we're the ground truth; nothing else to do, since Document listens directly to us
@@ -542,6 +545,8 @@ define(function (require, exports, module) {
                 throw new Error("ERROR: Typing in Editor should not destroy its own _visibleRange");
             }
         }
+        
+        CodeHintManager.handleChange(this);
     };
     
     /**
@@ -578,8 +583,9 @@ define(function (require, exports, module) {
      * Responds to the Document's underlying file being deleted. The Document is now basically dead,
      * so we must close.
      */
-    Editor.prototype._handleDocumentDeleted = function () {
-        $(this).triggerHandler("lostContent");
+    Editor.prototype._handleDocumentDeleted = function (event) {
+        // Pass the delete event along as the cause (needed in MultiRangeInlineEditor)
+        $(this).triggerHandler("lostContent", [event]);
     };
     
     
@@ -598,41 +604,42 @@ define(function (require, exports, module) {
         });
         this._codeMirror.setOption("onKeyEvent", function (instance, event) {
             $(self).triggerHandler("keyEvent", [self, event]);
-            return false;   // false tells CodeMirror we didn't eat the event
+            return event.defaultPrevented;   // false tells CodeMirror we didn't eat the event
         });
         this._codeMirror.setOption("onCursorActivity", function (instance) {
             $(self).triggerHandler("cursorActivity", [self]);
         });
         this._codeMirror.setOption("onScroll", function (instance) {
+            // If this editor is visible, close all dropdowns on scroll.
+            // (We don't want to do this if we're just scrolling in a non-visible editor
+            // in response to some document change event.)
+            if (self.isFullyVisible()) {
+                Menus.closeAll();
+            }
+
             $(self).triggerHandler("scroll", [self]);
         
             // notify all inline widgets of a position change
             self._fireWidgetOffsetTopChanged(self.getFirstVisibleLine() - 1);
         });
-    };
-    
-    /**
-     * @return {string} The editor's current contents
-     * Semi-private: only Document/EditableDocumentModel should call this.
-     */
-    Editor.prototype._getText = function () {
-        return this._codeMirror.getValue();
-    };
-    
-    /**
-     * Sets the contents of the editor. Treated as an edit: adds an undo step and dispatches a
-     * change event.
-     * Note: all line endings will be changed to LFs.
-     * Semi-private: only Document/EditableDocumentModel should call this.
-     * @param {!string} text
-     */
-    Editor.prototype._setText = function (text) {
-        this._codeMirror.setValue(text);
+
+        // Convert CodeMirror onFocus events to EditorManager focusedEditorChanged
+        this._codeMirror.setOption("onFocus", function () {
+            self._focused = true;
+            
+            if (!self._internalFocus) {
+                EditorManager._doFocusedEditorChanged(self);
+            }
+        });
+        
+        this._codeMirror.setOption("onBlur", function () {
+            self._focused = false;
+        });
     };
     
     /**
      * Sets the contents of the editor and clears the undo/redo history. Dispatches a change event.
-     * Semi-private: only Document/EditableDocumentModel should call this.
+     * Semi-private: only Document should call this.
      * @param {!string} text
      */
     Editor.prototype._resetText = function (text) {
@@ -658,10 +665,31 @@ define(function (require, exports, module) {
     /**
      * Gets the current cursor position within the editor. If there is a selection, returns whichever
      * end of the range the cursor lies at.
+     * @param {boolean} expandTabs If true, return the actual visual column number instead of the character offset in
+     *      the "ch" property.
      * @return !{line:number, ch:number}
      */
-    Editor.prototype.getCursorPos = function () {
-        return this._codeMirror.getCursor();
+    Editor.prototype.getCursorPos = function (expandTabs) {
+        var cursor = this._codeMirror.getCursor();
+        
+        if (expandTabs) {
+            var line    = this._codeMirror.getRange({line: cursor.line, ch: 0}, cursor),
+                tabSize = Editor.getTabSize(),
+                column  = 0,
+                i;
+
+            for (i = 0; i < line.length; i++) {
+                if (line[i] === '\t') {
+                    column += (tabSize - (column % tabSize));
+                } else {
+                    column++;
+                }
+            }
+            
+            cursor.ch = column;
+        }
+        
+        return cursor;
     };
     
     /**
@@ -672,16 +700,47 @@ define(function (require, exports, module) {
     Editor.prototype.setCursorPos = function (line, ch) {
         this._codeMirror.setCursor(line, ch);
     };
+
+    /**
+     * Given a position, returns its index within the text (assuming \n newlines)
+     * @param {!{line:number, ch:number}}
+     * @return {number}
+     */
+    Editor.prototype.indexFromPos = function (coords) {
+        return this._codeMirror.indexFromPos(coords);
+    };
+
+    /**
+     * Returns true if pos is between start and end (inclusive at both ends)
+     * @param {{line:number, ch:number}} pos
+     * @param {{line:number, ch:number}} start
+     * @param {{line:number, ch:number}} end
+     *
+     */
+    Editor.prototype.posWithinRange = function (pos, start, end) {
+        var startIndex = this.indexFromPos(start),
+            endIndex = this.indexFromPos(end),
+            posIndex = this.indexFromPos(pos);
+
+        return posIndex >= startIndex && posIndex <= endIndex;
+    };
+    
+    /**
+     * @return {boolean} True if there's a text selection; false if there's just an insertion point
+     */
+    Editor.prototype.hasSelection = function () {
+        return this._codeMirror.somethingSelected();
+    };
     
     /**
      * Gets the current selection. Start is inclusive, end is exclusive. If there is no selection,
      * returns the current cursor position as both the start and end of the range (i.e. a selection
      * of length zero).
-     * @return !{start:{line:number, ch:number}, end:{line:number, ch:number}}
+     * @return {!{start:{line:number, ch:number}, end:{line:number, ch:number}}}
      */
     Editor.prototype.getSelection = function () {
         var selStart = this._codeMirror.getCursor(true),
-            selEnd = this._codeMirror.getCursor(false);
+            selEnd   = this._codeMirror.getCursor(false);
         return { start: selStart, end: selEnd };
     };
     
@@ -703,6 +762,15 @@ define(function (require, exports, module) {
         this._codeMirror.setSelection(start, end);
     };
 
+    /**
+     * Selects word that the given pos lies within or adjacent to. If pos isn't touching a word
+     * (e.g. within a token like "//"), moves the cursor to pos without selecting a range.
+     * @param {!{line:number, ch:number}}
+     */
+    Editor.prototype.selectWordAt = function (pos) {
+        this._codeMirror.selectWordAt(pos);
+    };
+    
 
     /**
      * Gets the total number of lines in the the document (includes lines not visible in the viewport)
@@ -778,16 +846,16 @@ define(function (require, exports, module) {
     
     /**
      * Returns the current scroll position of the editor.
-     * @returns {{x:number, y:number}} The x,y scroll position.
+     * @returns {{x:number, y:number}} The x,y scroll position in pixels
      */
     Editor.prototype.getScrollPos = function () {
-        return this._codeMirror.scrollPos();
+        return this._codeMirror.getScrollInfo();
     };
     
     /**
      * Sets the current scroll position of the editor.
-     * @param {number} x scrollLeft position
-     * @param {number} y scrollTop position
+     * @param {number} x scrollLeft position in pixels
+     * @param {number} y scrollTop position in pixels
      */
     Editor.prototype.setScrollPos = function (x, y) {
         this._codeMirror.scrollTo(x, y);
@@ -810,6 +878,18 @@ define(function (require, exports, module) {
         
         // once this widget is added, notify all following inline widgets of a position change
         this._fireWidgetOffsetTopChanged(pos.line);
+    };
+    
+    /**
+     * Removes all inline widgets
+     */
+    Editor.prototype.removeAllInlineWidgets = function () {
+        // copy the array because _removeInlineWidgetInternal will modifying the original
+        var widgets = [].concat(this.getInlineWidgets());
+        
+        widgets.forEach(function (widget) {
+            this.removeInlineWidget(widget);
+        }, this);
     };
     
     /**
@@ -901,13 +981,20 @@ define(function (require, exports, module) {
     
     /** Gives focus to the editor control */
     Editor.prototype.focus = function () {
+        // Capture the currently focused editor before making CodeMirror changes
+        var previous = EditorManager.getFocusedEditor();
+
+        // Prevent duplicate focusedEditorChanged events with this _internalFocus flag
+        this._internalFocus = true;
         this._codeMirror.focus();
+        this._internalFocus = false;
+
+        EditorManager._doFocusedEditorChanged(this, previous);
     };
     
     /** Returns true if the editor has focus */
     Editor.prototype.hasFocus = function () {
-        // The CodeMirror instance wrapper has a "CodeMirror-focused" class set when focused
-        return $(this.getScrollerElement()).hasClass("CodeMirror-focused");
+        return this._focused;
     };
     
     /**
@@ -952,15 +1039,6 @@ define(function (require, exports, module) {
      */
     Editor.prototype.isFullyVisible = function () {
         return $(this.getRootElement()).is(":visible");
-    };
-    
-    /**
-     * Returns the text of the given line.
-     * @param {number} The zero-based number of the line to retrieve.
-     * @return {string} The contents of the line.
-     */
-    Editor.prototype.getLineText = function (num) {
-        return this._codeMirror.getLine(num);
     };
     
     /**
@@ -1045,19 +1123,52 @@ define(function (require, exports, module) {
         _instances.forEach(function (editor) {
             editor._codeMirror.setOption("indentWithTabs", _useTabChar);
         });
+        
+        _prefs.setValue("useTabChar", Boolean(_useTabChar));
     };
     
-    /** @type {boolean}  Gets whether all Editors use tab characters (vs. spaces) when inserting new text */
+    /** @type {boolean} Gets whether all Editors use tab characters (vs. spaces) when inserting new text */
     Editor.getUseTabChar = function (value) {
         return _useTabChar;
     };
 
+    /**
+     * Sets tab character width. Affects all Editors.
+     * @param {number} value
+     */
+    Editor.setTabSize = function (value) {
+        _tabSize = value;
+        _instances.forEach(function (editor) {
+            editor._codeMirror.setOption("tabSize", _tabSize);
+        });
+        
+        _prefs.setValue("tabSize", _tabSize);
+    };
+    
+    /** @type {number} Get indent unit  */
+    Editor.getTabSize = function (value) {
+        return _tabSize;
+    };
+
+    /**
+     * Sets indentation width. Affects all Editors.
+     * @param {number} value
+     */
+    Editor.setIndentUnit = function (value) {
+        _indentUnit = value;
+        _instances.forEach(function (editor) {
+            editor._codeMirror.setOption("indentUnit", _indentUnit);
+        });
+        
+        _prefs.setValue("indentUnit", _indentUnit);
+    };
+    
+    /** @type {number} Get indentation width */
+    Editor.getIndentUnit = function (value) {
+        return _indentUnit;
+    };
     
     // Global commands that affect the currently focused Editor instance, wherever it may be
-    CommandManager.register(Strings.CMD_FIND,           Commands.EDIT_FIND, _launchFind);
-    CommandManager.register(Strings.CMD_FIND_NEXT,      Commands.EDIT_FIND_NEXT, _findNext);
-    CommandManager.register(Strings.CMD_REPLACE,        Commands.EDIT_REPLACE, _replace);
-    CommandManager.register(Strings.CMD_FIND_PREVIOUS,  Commands.EDIT_FIND_PREVIOUS, _findPrevious);
     CommandManager.register(Strings.CMD_SELECT_ALL,     Commands.EDIT_SELECT_ALL, _handleSelectAll);
 
     // Define public API

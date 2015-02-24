@@ -27,7 +27,7 @@
 /*global define, $, CodeMirror, window */
 
 define(function (require, exports, module) {
-    'use strict';
+    "use strict";
 
     // Load dependent modules
     var DocumentManager     = require("document/DocumentManager"),
@@ -73,7 +73,7 @@ define(function (require, exports, module) {
     
     /**
      * @constructor
-     *
+     * @extends {InlineWidget}
      */
     function InlineTextEditor() {
         InlineWidget.call(this);
@@ -199,11 +199,6 @@ define(function (require, exports, module) {
             endLine: endLine
         };
         
-        // close handler attached to each inline codemirror instance
-        function closeThisInline() {
-            self.close();
-        }
-        
         // root container holding header & editor
         var $wrapperDiv = $("<div/>");
         var wrapperDiv = $wrapperDiv[0];
@@ -239,7 +234,7 @@ define(function (require, exports, module) {
         
         
         // Create actual Editor instance
-        var inlineInfo = EditorManager.createInlineEditorForDocument(doc, range, wrapperDiv, closeThisInline, additionalKeys);
+        var inlineInfo = EditorManager.createInlineEditorForDocument(doc, range, wrapperDiv, additionalKeys);
         this.editors.push(inlineInfo.editor);
         container.appendChild(wrapperDiv);
 
@@ -252,11 +247,9 @@ define(function (require, exports, module) {
             $lineNumber.text(inlineInfo.editor.getFirstVisibleLine() + 1);
         });
         
-        // If Document's file is deleted, or Editor loses sync with Document, just close
+        // If Document's file is deleted, or Editor loses sync with Document, delegate to this._onLostContent()
         $(inlineInfo.editor).on("lostContent", function () {
-            // Note: this closes the entire inline widget if any one Editor loses sync. This seems
-            // better than leaving it open but suddenly removing one rule from the result list.
-            self.close();
+            self._onLostContent.apply(self, arguments);
         });
         
         // set dirty indicator state
@@ -289,14 +282,15 @@ define(function (require, exports, module) {
             return editor.hasFocus();
         });
     };
-    
-    /** Closes this inline widget and all its contained Editors */
-    InlineTextEditor.prototype.close = function () {
-        var shouldMoveFocus = this._editorHasFocus();
-        EditorManager.closeInlineWidget(this.hostEditor, this, shouldMoveFocus);
-        // closeInlineWidget() causes our onClosed() to be called
-    };
         
+    /**
+     * If Document's file is deleted, or Editor loses sync with Document, just close
+     */
+    InlineTextEditor.prototype._onLostContent = function () {
+        // Note: this closes the entire inline widget if any one Editor loses sync. This seems
+        // better than leaving it open but suddenly removing one rule from the result list.
+        this.close();
+    };
     
     // consolidate all dirty document updates
     $(DocumentManager).on("dirtyFlagChange", _dirtyFlagChangeHandler);

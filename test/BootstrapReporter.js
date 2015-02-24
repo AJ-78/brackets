@@ -1,26 +1,29 @@
 /*jslint vars: true, plusplus: true, devel: true, browser: true, nomen: true, indent: 4, maxerr: 50, forin: true */
-/*global jasmine, document */
-(function ($) {
+/*global jasmine, $, define, document, require */
+define(function (require, exports, module) {
     'use strict';
+    
+    var UrlParams = require("utils/UrlParams").UrlParams;
 
-    jasmine.BootstrapReporter = function (doc) {
-        this._paramMap = {};
+    jasmine.BootstrapReporter = function (doc, filter) {
         this.document = doc || document;
         this._env = jasmine.getEnv();
+        this.params = new UrlParams();
+        this.params.parse();
         
         // parse querystring
         var self = this,
-            params = this.document.location.search.substring(1).split('&'),
             i,
             p;
         
-        for (i = 0; i < params.length; i++) {
-            p = params[i].split('=');
-            this._paramMap[decodeURIComponent(p[0])] = decodeURIComponent(p[1]);
-        }
+        this._runAll = this.params.get("spec") === "All";
         
-        this._runAll = this._paramMap.spec === "All";
-        this._env.specFilter = this.createSpecFilter(this._paramMap.spec);
+        // _topLevelFilter is applied first - selects Performance vs. Unit test suites
+        this._topLevelFilter = filter;
+        
+        // Jasmine's runner uses the specFilter to choose which tests to run.
+        // If you selected an option other than "All" this will be a subset of all tests loaded.
+        this._env.specFilter = this.createSpecFilter(this.params.get("spec"));
         this._runner = this._env.currentRunner();
         
         // build DOM immediately
@@ -44,12 +47,43 @@
         this.$resultsContainer = $("#results-container");
     };
 
+    /**
+     * @private
+     * Filters specs by full name. Applies _topLevelFilter first before checking
+     * for a matching starting substring.
+     */
     jasmine.BootstrapReporter.prototype.createSpecFilter = function (filterString) {
+        var self = this;
+        
         return function (spec) {
+            // filterString is undefined when no top-level suite is active (e.g. "All", "HTMLUtils", etc.)
+            // When undefined, all specs fail this filter and no tests are ran. This is by design.
+            // This setup allows the SpecRunner to load initially without automatically running all tests.
+            if (filterString === undefined) {
+                return false;
+            }
+            
+            if (!self._topLevelFilter(spec)) {
+                return false;
+            }
+            
             if (filterString === "All") {
                 return true;
             }
-            return spec.getFullName().indexOf(filterString) === 0;
+
+            if (spec.getFullName() === filterString) {
+                return true;
+            }
+            
+            // spec.getFullName() concatenates the names of all containing describe()s. We want to filter
+            // on just the outermost suite's name (i.e., the item that was selected in the spec list UI)
+            // to avoid ambiguity when suite names share the same prefix.
+            var topLevelSuite = spec.suite;
+            while (topLevelSuite.parentSuite) {
+                topLevelSuite = topLevelSuite.parentSuite;
+            }
+            
+            return topLevelSuite.description === filterString;
         };
     };
         
@@ -82,7 +116,11 @@
             self = this;
         
         // count specs attached directly to this suite
-        count = suite.specs().length;
+        suite.specs().forEach(function (spec, index) {
+            if (self._topLevelFilter(spec)) {
+                count++;
+            }
+        });
         
         // recursively count child suites
         suite.suites().forEach(function (child, index) {
@@ -110,11 +148,22 @@
             return 0;
         });
         
-        this.$suiteList.append(this._createSuiteListItem(null, this._runner.specs().length));
-        
         topLevel.forEach(function (suite, index) {
-            self.$suiteList.append(self._createSuiteListItem(suite, self._countSpecs(suite)));
+            var count = self._countSpecs(suite);
+            
+            if (count > 0) {
+                self.$suiteList.append(self._createSuiteListItem(suite, count));
+            }
         });
+        
+        // count all speces
+        var allSpecsCount = 0;
+        $.each(this._topLevelSuiteMap, function (index, value) {
+            allSpecsCount += value.specCount;
+        });
+        
+        // add an "all" top-level suite
+        this.$suiteList.prepend(this._createSuiteListItem(null, allSpecsCount));
     };
     
     jasmine.BootstrapReporter.prototype._showProgressBar = function (spec) {
@@ -127,15 +176,15 @@
     };
     
     jasmine.BootstrapReporter.prototype.reportRunnerStarting = function (runner) {
-        var i,
-            specs = runner.specs(),
-            topLevelData;
+        var specs = runner.specs(),
+            topLevelData,
+            self = this;
     
         // create top level suite list navigation
         this._createSuiteList();
         
         // highlight the current suite
-        topLevelData = (this._paramMap.spec) ? this._topLevelSuiteMap[this._paramMap.spec] : null;
+        topLevelData = (this.params.get("spec")) ? this._topLevelSuiteMap[this.params.get("spec")] : null;
         
         if (topLevelData) {
             topLevelData.$listItem.toggleClass("active", true);
@@ -144,11 +193,11 @@
         this._specCount = 0;
         this._specCompleteCount = 0;
         
-        for (i = 0; i < specs.length; i++) {
-            if (this._env.specFilter(specs[i])) {
-                this._specCount++;
+        specs.forEach(function (spec, index) {
+            if (self._env.specFilter(spec)) {
+                self._specCount++;
             }
-        }
+        });
         
         if (this._specCount) {
             this._showProgressBar();
@@ -177,7 +226,7 @@
             passed,
             data = this._topLevelSuiteMap[suite.getFullName()];
         
-        if ((suite.getFullName() === this._paramMap.spec) && data) {
+        if ((suite.getFullName() === this.params.get("spec")) && data) {
             passed = results.passed();
                                
             data.$badgeAll.hide();
@@ -230,13 +279,22 @@
     
     jasmine.BootstrapReporter.prototype._updateStatus = function (spec) {
         var data = this._getTopLevelSuiteData(spec),
-            allData = this._topLevelSuiteMap.All,
-            results = spec.results();
+            allData,
+            results;
+        
+        // Top-level suite data will not exist if filtered
+        if (!data) {
+            return;
+        }
+        
+        allData = this._topLevelSuiteMap.All;
+        results = spec.results();
         
         this._updateSuiteStatus(data, results);
         this._updateSuiteStatus(allData, results);
     };
     
+    // Jasmine calls this function for all specs, not just filtered specs.
     jasmine.BootstrapReporter.prototype.reportSpecResults = function (spec) {
         var results = spec.results(),
             $specLink,
@@ -293,4 +351,4 @@
     
     jasmine.BootstrapReporter.prototype.log = function (str) {
     };
-}(window.jQuery));
+});

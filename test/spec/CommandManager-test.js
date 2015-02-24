@@ -40,10 +40,11 @@ define(function (require, exports, module) {
 
         beforeEach(function () {
             executed = false;
-            CommandManager._reset();
+            CommandManager._testReset();
         });
 
         afterEach(function () {
+            CommandManager._testRestore();
         });
         
         it("register and get a command and validate parameters", function () {
@@ -56,7 +57,7 @@ define(function (require, exports, module) {
             expect(command._commandFn).toBe(testCommandFn);
 
             // duplicate command
-            expect(function () { CommandManager.register("test command", commandID, testCommandFn); }).toThrow();
+            expect(CommandManager.register("test command", commandID, testCommandFn)).toBeFalsy();
 
             // missing arguments
             expect(function () { CommandManager.register(null, "test-command-id2", testCommandFn); }).toThrow();

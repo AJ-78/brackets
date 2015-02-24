@@ -29,7 +29,8 @@ define(function (require, exports, module) {
     'use strict';
     
     var Editor          = require("editor/Editor").Editor,
-        SpecRunnerUtils = require("./SpecRunnerUtils.js"),
+        EditorManager   = require("editor/EditorManager"),
+        SpecRunnerUtils = require("spec/SpecRunnerUtils"),
         EditorUtils     = require("editor/EditorUtils");
 
     describe("Editor", function () {
@@ -37,23 +38,19 @@ define(function (require, exports, module) {
         var myDocument, myEditor;
         
         function createTestEditor(content, mode) {
-            // create dummy Document for the Editor
-            myDocument = SpecRunnerUtils.createMockDocument(content);
-            
-            // create Editor instance (containing a CodeMirror instance)
-            $("body").append("<div id='editor'/>");
-            myEditor = new Editor(myDocument, true, mode, $("#editor").get(0), {});
+            // create dummy Document and Editor
+            var mocks = SpecRunnerUtils.createMockEditor(content, mode);
+            myDocument = mocks.doc;
+            myEditor = mocks.editor;
         }
 
         afterEach(function () {
             if (myEditor) {
-                myEditor.destroy();
+                SpecRunnerUtils.destroyMockEditor(myDocument);
                 myEditor = null;
-                $("#editor").remove();
                 myDocument = null;
             }
         });
-        
 
         describe("Editor wrapper", function () {
             beforeEach(function () {
@@ -62,7 +59,7 @@ define(function (require, exports, module) {
             
             it("should initialize with content", function () {
                 // verify editor content
-                expect(myEditor._getText()).toEqual(defaultContent);
+                expect(myEditor._codeMirror.getValue()).toEqual(defaultContent);
             });
             
             // FUTURE: this should really be in a Document unit test, but there's no "official"
@@ -80,7 +77,7 @@ define(function (require, exports, module) {
                     expect(changeList.next).toBe(undefined);
                 }
                 $(myDocument).on("change", changeHandler);
-                myEditor._setText("new content");
+                myEditor._codeMirror.setValue("new content");
                 expect(changeFired).toBe(true);
             });
 
